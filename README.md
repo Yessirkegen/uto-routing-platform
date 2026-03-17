@@ -1,64 +1,401 @@
-# UTO Routing Platform
+# Платформа УТО
 
-Прототип backend-сервиса для интеллектуальной маршрутизации и диспетчеризации спецтехники на нефтяных месторождениях.
+Веб-платформа для демонстрации интеллектуальной диспетчеризации спецтехники на нефтяных месторождениях.
 
-Продукт включает:
-- построение маршрутов по графу дорог
-- рекомендации `top-k` техники под заявку с объяснимым score
-- batch-планирование по стратегиям `baseline`, `priority_greedy`, `multistop_heuristic`
-- более сильный batch solver `ortools_solver`
-- оценку выгодности multi-stop группировки
-- benchmark/simulation для сравнения подходов на сотнях и тысячах сценариев
-- встроенный sample dataset для мгновенного старта
-- сгенерированный `CSV`-dataset для file-based тестов
-- встроенный web dashboard без отдельного frontend build step
-- live-state endpoint и dispatcher audit trail
-- Leaflet map с vehicle/task overlay и последними route/plan результатами
-- корректную модель времени для `day/night` смен, включая ночные задачи после полуночи
-- richer diagnostics: task context, warnings, score breakdown, plan metrics и сравнение с baseline
-- прямой PostgreSQL adapter в дополнение к `sample` и `directory` режимам
-- persistent benchmark reports с export в `CSV`
-- historical replay для визуализации и анимации движения техники
-- weight tuning для greedy scoring
-- optional API-key auth, structured logging и CI workflow
+Система умеет:
+- подбирать технику под заявку
+- строить маршрут по дорожному графу
+- оценивать, какие заявки выгодно объединять в один выезд
+- строить общий план назначений на набор заявок
+- сравнивать несколько алгоритмов на синтетических сценариях
+- показывать движение машин на карте и проигрывать сценарий по шагам
 
-## Стек
-- `Python 3.11+`
-- `FastAPI`
-- чистый Python core без тяжелых обязательных зависимостей
+Этот `README` написан не только для разработчика, но и для ревьювера или оператора, который открывает UI впервые и хочет понять:
+- что именно делает система
+- куда нажимать в интерфейсе
+- как интерпретировать результат
+- в каком порядке показывать демо
 
-## Запуск для ревьювера
-Самый простой путь:
+## Что это за платформа
+Если коротко, это симулятор/прототип диспетчерской системы.
+
+На входе есть:
+- парк машин
+- дорожный граф
+- скважины
+- заявки на работы
+- правила совместимости техники и работ
+
+На выходе система дает:
+- какую машину лучше выбрать под заявку
+- за сколько она доедет
+- какой будет маршрут
+- какие заявки выгодно объединить
+- как будет выглядеть общий план по всему набору заявок
+- что лучше по сравнению с `baseline`
+
+## Кому это нужно
+Платформа рассчитана на три типа пользователей:
+
+1. `Ревьювер`
+Открывает сайт, входит под учетной записью и смотрит демо, карту, алгоритмы и результаты.
+
+2. `Диспетчер`
+Хочет быстро понять, какую машину назначить, где она находится, как она поедет и что система советует.
+
+3. `Разработчик`
+Запускает сервис локально или через `Docker`, читает `API`, меняет правила и алгоритмы.
+
+## Самый короткий сценарий для ревьювера
+Если у вас уже есть выданный URL и логин:
+
+1. Откройте страницу входа.
+2. Введите логин и пароль ревьювера.
+3. После входа посмотрите на блок `Живая карта движения`.
+4. В блоке `Подбор техники под заявку` выберите одну заявку и нажмите `Подобрать технику`.
+5. Нажмите `Маршрут` у лучшего кандидата и посмотрите путь на карте.
+6. Откройте блок `План на смену / день` и постройте общий план.
+7. Запустите `Бенчмарк алгоритмов`, чтобы увидеть сравнение стратегий и анимацию движения техники.
+
+Если времени совсем мало, именно этот порядок дает самый понятный эффект.
+
+## Как войти в систему
+Система использует reviewer-auth на уровне приложения.
+
+Если вы открываете уже развернутую платформу, вам нужны только:
+- URL системы
+- логин ревьювера
+- пароль ревьювера
+
+Никакие `Docker`, `CLI` и `API` для просмотра демо не нужны.
+
+После открытия URL вы попадете на страницу входа:
+- поле `Логин`
+- поле `Пароль`
+- кнопка `Войти`
+
+После успешного входа:
+- ставится защищенная cookie-сессия
+- открывается основная панель
+- `API`, `UI` и `WebSocket` работают уже в рамках вашей сессии
+
+Если сессия истечет, система отправит вас обратно на `/login`.
+
+## Как читать интерфейс
+
+### 1. Сводка по данным
+Первый блок на странице.
+
+Что показывает:
+- сколько узлов и ребер в графе
+- сколько скважин
+- сколько машин
+- сколько заявок
+- сколько дневных и ночных заявок
+- какие типы работ есть в наборе
+
+Зачем нужен:
+- быстро понять, что данные действительно загрузились
+- убедиться, что система работает не “в пустоте”
+
+### 2. Живая карта движения
+Это главный экран для демонстрации.
+
+Что есть в блоке:
+- карта `Leaflet`
+- выбор сценария проигрывания
+- кнопки управления анимацией
+- ползунок времени
+- панель `Что происходит сейчас`
+
+Что отображается на карте:
+- машины
+- точки заявок / скважины
+- последний построенный маршрут
+- линии из последнего плана
+- движущиеся машины во время replay
+
+Что значат цвета и статусы:
+- `Свободна` — машина не занята и не едет
+- `Ожидает старт` — машина назначена, но время начала еще не наступило
+- `В пути` — машина едет по маршруту
+- `На точке` — машина доехала, но работы еще не начались
+- `В работе` — выполняет заявку
+- `Завершила` — закончила все назначенные работы в сценарии
+
+### 3. Управление проигрыванием
+Над картой есть панель управления.
+
+Что можно делать:
+- `Старт анимации`
+- `Пауза`
+- `Шаг назад`
+- `Шаг вперед`
+- `Сброс`
+- изменить скорость: `0.5x`, `1x`, `2x`, `4x`
+- двигать `Шкалу времени проигрывания` вручную
+
+Как это использовать:
+- если хотите быстро показать “как машины едут”, нажимайте `Старт анимации`
+- если хотите детально разобрать момент, ставьте `Пауза`
+- если хотите показать отдельный эпизод, перемещайте ползунок
+
+### 4. Панель "Что происходит сейчас"
+Справа от карты.
+
+Что показывает:
+- текущий кадр replay
+- сколько машин в пути
+- сколько машин на работе
+- сколько машин ждут
+- список всех машин с их текущим статусом и активной заявкой
+
+Это самый понятный блок для объяснения “живого” поведения алгоритма.
+
+### 5. Подбор техники под заявку
+Это блок для ответа на вопрос:
+`Какую машину назначить на одну конкретную заявку?`
+
+Есть два режима:
+
+1. `Заявка из набора`
+Вы выбираете готовую заявку из списка.
+
+2. `Своя заявка`
+Вы вручную задаете:
+- ID
+- приоритет
+- скважину
+- тип работ
+- плановый старт
+- длительность
+- смену
+- операционный день
+
+После нажатия `Подобрать технику` система возвращает список кандидатов.
+
+Как читать результат:
+- `Пробег` — сколько километров ехать по графу
+- `ETA` — через сколько минут машина доедет / когда сможет начать работу
+- `Score` — относительная полезность кандидата
+- `Обоснование` — человеческое пояснение выбора
+
+Кнопка `Маршрут` у кандидата:
+- автоматически строит путь до точки работ
+- обновляет карту и блок маршрута
+
+### 6. Маршрут до точки работ
+Это блок для построения пути от выбранной машины до выбранной скважины.
+
+Что вводится:
+- машина
+- скважина
+- при желании скорость
+
+Что показывает:
+- длину маршрута
+- время в пути
+- число узлов маршрута
+- графическую линию пути
+
+Когда использовать:
+- когда нужно показать, что система считает путь именно по графу дорог
+- когда нужно визуально объяснить, почему одна машина лучше другой
+
+### 7. Группировка заявок в один выезд
+Этот блок отвечает на вопрос:
+`Какие заявки можно выгодно объединить в один выезд?`
+
+Как пользоваться:
+- выберите несколько заявок
+- задайте лимиты:
+  - максимальное время выезда
+  - допустимый коэффициент крюка
+- нажмите `Оценить группировку`
+
+Что вернется:
+- стратегия группировки
+- общий пробег
+- baseline пробег
+- экономия
+- список групп
+
+Как читать результат:
+- если стратегия `Раздельное обслуживание`, заявки лучше не объединять
+- если `Смешанная группировка`, часть заявок выгодно объединить
+- если `Один выезд одной машины`, есть плотный компактный кластер
+
+### 8. План на смену / день
+Это блок для общего планирования по всем заявкам набора.
+
+Вы выбираете алгоритм:
+- `Ближайшая свободная`
+- `Приоритетный жадный`
+- `Группировка выездов`
+- `Глобальный OR-Tools`
+
+После нажатия `Построить план` система показывает:
+- сколько назначений получилось
+- покрытие заявок
+- суммарный пробег
+- взвешенную просрочку
+- число неназначенных заявок
+- сравнение с `baseline`
+- список назначений по машинам
+
+Это основной блок для ответа на вопрос:
+`Как будет выглядеть план целиком?`
+
+### 9. Бенчмарк алгоритмов
+Блок нужен не для диспетчера, а для сравнения алгоритмов.
+
+Что можно настроить:
+- число сценариев
+- диапазон числа заявок
+- диапазон числа машин
+- `seed`
+
+После запуска:
+- строится сравнение нескольких стратегий
+- автоматически запускается анимация движения техники
+- создается benchmark report
+- можно скачать `CSV`
+
+Как читать таблицу:
+- `Средний пробег` — сколько маршрута в среднем проезжает парк
+- `Взвешенная просрочка` — насколько алгоритм нарушает SLA с учетом приоритета
+- `High-priority вовремя` — доля срочных заявок, начатых без опоздания
+- `Время расчета` — сколько занял алгоритм
+- `vs baseline` — улучшение или ухудшение относительно наивного правила
+
+### 10. Подбор весов скоринга
+Этот блок нужен для анализа `priority_greedy`.
+
+Система перебирает несколько наборов весов и показывает:
+- лучший кандидат
+- значение целевой функции
+- топ-таблицу по вариантам
+
+Это полезно, если вы хотите объяснить:
+- почему один набор весов лучше другого
+- насколько чувствителен greedy-алгоритм к настройке коэффициентов
+
+### 11. Журнал решений диспетчера
+Последний блок на странице.
+
+Он хранит:
+- последние расчеты
+- параметры запросов
+- ответы системы
+- короткое summary по действию
+
+Используйте его, когда нужно:
+- быстро вернуться к предыдущему действию
+- понять, что именно делала система
+- показать ревьюверу прозрачность решений
+
+## Что значат важные термины
+
+| Термин | Что это значит |
+|---|---|
+| `priority` | Приоритет заявки: высокий, средний, низкий |
+| `ETA` | Через сколько минут машина доедет или сможет начать работу |
+| `baseline` | Наивная стратегия для сравнения, обычно “ближайшая свободная” |
+| `score` | Относительная оценка кандидата: чем выше, тем лучше |
+| `weighted lateness` | Просрочка с учетом важности заявки |
+| `assignment rate` | Доля заявок, которым система смогла назначить технику |
+| `detour ratio` | Насколько длиннее объединенный маршрут по сравнению с прямым вариантом |
+| `replay` | Проигрывание рассчитанного сценария по кадрам |
+| `live-state` | Текущее состояние данных для UI: машины, заявки, последние маршруты и планы |
+
+## Какой сценарий показа самый убедительный
+
+### Сценарий 1. Одна срочная заявка
+1. В `Подбор техники под заявку` выбрать существующую заявку.
+2. Показать топ кандидатов.
+3. Нажать `Маршрут` у лучшей машины.
+4. Объяснить, почему выбрана именно она.
+
+Что демонстрирует:
+- ETA
+- priority
+- compatibility
+- explainability
+
+### Сценарий 2. Несколько близких заявок
+1. Открыть `Группировка заявок в один выезд`.
+2. Выбрать несколько задач в одном районе.
+3. Показать экономию против раздельного обслуживания.
+
+Что демонстрирует:
+- multi-stop
+- detour control
+- экономию пробега
+
+### Сценарий 3. Полный план
+1. Открыть `План на смену / день`.
+2. Построить план сначала `baseline`, потом `ortools_solver`.
+3. Сравнить метрики.
+4. Показать линии на карте.
+
+Что демонстрирует:
+- глобальную оптимизацию
+- сравнение стратегий
+- связь метрик с реальными маршрутами
+
+### Сценарий 4. Бенчмарк и анимация
+1. Запустить `Бенчмарк алгоритмов`.
+2. Одновременно смотреть на карту.
+3. Показать, как техника движется.
+4. Скачать `CSV` отчета.
+
+Что демонстрирует:
+- benchmarking
+- replay
+- экспорт результатов
+
+## Если что-то кажется “не работает”
+
+### Карта открылась, но ничего не движется
+Скорее всего:
+- replay еще не запущен
+- стоит пауза
+- ползунок времени в начале
+
+Что сделать:
+1. Нажать `Старт анимации`
+2. Проверить `Скорость проигрывания`
+3. Подвинуть `Шкалу времени`
+
+### На карте нет свежих данных
+Нажмите:
+- `Обновить состояние`
+
+Если `WebSocket` недоступен, система сама перейдет на резервный polling.
+
+### Пустой журнал решений
+Это значит, что вы еще не запускали:
+- подбор техники
+- маршрут
+- план
+- бенчмарк
+- tuning
+
+Сделайте любое из этих действий и затем нажмите:
+- `Обновить журнал`
+
+## Запуск локально для разработчика
+
+### Вариант 1. Через Docker
+Самый простой способ:
 
 ```bash
 docker compose up --build
 ```
 
-Если нужна публичная reviewer-ссылка через quick tunnel:
-
-```bash
-docker compose --profile share up --build
-```
-
-Получить текущий публичный URL:
-
-```bash
-python3 scripts/print_share_url.py
-```
-
-или
-
-```bash
-make docker-share-url
-```
-
-После старта:
-
-- `http://127.0.0.1:8000/` - web dashboard
-- `http://127.0.0.1:8000/docs` - Swagger UI
-- `http://127.0.0.1:8000/health` - healthcheck
-
-Для `share`-режима публичный URL появится в логах сервиса `cloudflared`.
+После запуска:
+- `http://127.0.0.1:8000`
+- `http://127.0.0.1:8000/docs`
 
 Остановка:
 
@@ -66,222 +403,60 @@ make docker-share-url
 docker compose down
 ```
 
-Если нужно полностью пересоздать и PostgreSQL volume с demo-данными:
+Полный сброс demo-данных:
 
 ```bash
 docker compose down -v
 docker compose up --build
 ```
 
-В `docker-compose.yml` теперь поднимаются:
-- `postgres` с auto-seeded demo dataset
-- `uto-routing-platform`, который читает данные уже напрямую из PostgreSQL
-- опционально `cloudflared` profile для публичной reviewer-ссылки
-
-UI теперь включает:
-- Leaflet карту с vehicle/task overlay
-- replay animation поверх карты
-- dispatcher audit trail
-- benchmark report export
-- weight tuning panel
-
-## Быстрый старт
-Если у вас есть обычный `pip`:
+### Вариант 2. Через Python
 
 ```bash
 python3 -m pip install -r requirements-dev.txt
 PYTHONPATH=. python3 -m uvicorn uto_routing.main:app --reload
 ```
 
-Сервис поднимется на `http://127.0.0.1:8000`.
+## Полезные команды
 
-Откройте в браузере:
-
-- `http://127.0.0.1:8000/` - web dashboard
-- `http://127.0.0.1:8000/docs` - Swagger UI
-
-## Основные эндпоинты
-- `GET /health`
-- `GET /app-config`
-- `GET /api/catalog`
-- `GET /api/live-state`
-- `GET /api/audit/trail`
-- `GET /api/benchmark/reports`
-- `GET /api/benchmark/reports/latest`
-- `GET /api/benchmark/reports/latest.csv`
-- `GET /api/dataset/summary`
-- `POST /api/recommendations`
-- `POST /api/route`
-- `POST /api/multitask`
-- `POST /api/plan`
-- `POST /api/benchmark/run`
-- `POST /api/replay/run`
-- `POST /api/tuning/run`
-- `POST /api/dataset/reload`
-
-## Примеры запросов
-
-### 1. Рекомендации по существующей заявке
 ```bash
-curl -X POST http://127.0.0.1:8000/api/recommendations \
-  -H "Content-Type: application/json" \
-  -d '{
-    "task_id": "T-2026-0001",
-    "strategy": "priority_greedy",
-    "top_k": 3
-  }'
+make run
+make test
+make export-csv
+make docker-up
+make docker-share
+make docker-share-url
+make docker-down
+make docker-reset
 ```
 
-### 2. Рекомендации по новой заявке
-```bash
-curl -X POST http://127.0.0.1:8000/api/recommendations \
-  -H "Content-Type: application/json" \
-  -d '{
-    "task_id": "CUSTOM-1",
-    "priority": "high",
-    "destination_uwi": "05-1200-501",
-    "planned_start": "2026-03-17T09:00:00",
-    "start_day": "2026-03-17",
-    "duration_hours": 4.5,
-    "task_type": "acidizing",
-    "strategy": "priority_greedy"
-  }'
-```
+## Варианты источника данных
+Платформа поддерживает три режима:
 
-### 3. Построение маршрута
-```bash
-curl -X POST http://127.0.0.1:8000/api/route \
-  -H "Content-Type: application/json" \
-  -d '{
-    "from": {"wialon_id": 10202},
-    "to": {"uwi": "05-1200-501"}
-  }'
-```
+1. `sample`
+Встроенные демо-данные.
 
-### 4. Анализ multi-stop
-```bash
-curl -X POST http://127.0.0.1:8000/api/multitask \
-  -H "Content-Type: application/json" \
-  -d '{
-    "task_ids": ["T-2026-0001", "T-2026-0002", "T-2026-0003"],
-    "constraints": {
-      "max_total_time_minutes": 480,
-      "max_detour_ratio": 1.3
-    }
-  }'
-```
+2. `directory`
+Чтение из файлов `CSV/JSON`.
 
-### 5. Batch-план по всем задачам
-```bash
-curl -X POST http://127.0.0.1:8000/api/plan \
-  -H "Content-Type: application/json" \
-  -d '{
-    "strategy": "multistop_heuristic"
-  }'
-```
+3. `postgres`
+Чтение напрямую из `PostgreSQL`.
 
-### 6. Benchmark на 1000 сценариев
-```bash
-curl -X POST http://127.0.0.1:8000/api/benchmark/run \
-  -H "Content-Type: application/json" \
-  -d '{
-    "scenarios": 1000,
-    "min_tasks": 6,
-    "max_tasks": 12,
-    "min_vehicles": 4,
-    "max_vehicles": 7,
-    "seed": 42
-  }'
-```
+### Готовый демо-набор файлов
+В репозитории уже есть:
 
-## Как устроены стратегии
-
-### `baseline`
-Наивное назначение: ближайшая совместимая техника, свободная к моменту начала работ.
-
-### `priority_greedy`
-Скоринг-кандидат для одиночной заявки и жадное batch-назначение с учетом:
-- расстояния по графу
-- ETA
-- времени освобождения техники
-- риска нарушения SLA
-- совместимости по типу работ
-
-### `multistop_heuristic`
-Формирует компактные пары задач, если это реально снижает пробег, после чего назначает группы на одну единицу техники.
-
-### `ortools_solver`
-Глобальный solver на `OR-Tools`, который одновременно учитывает:
-- множественные стартовые позиции техники
-- совместимость техники и типа работ
-- временные окна
-- soft penalties по SLA
-- multi-stop последовательности внутри маршрутов
-
-## Replay и анимация
-`/api/replay/run` строит replay timeline по выбранной стратегии и возвращает playback frames.
-
-В UI benchmark-кнопка автоматически запускает replay animation параллельно с benchmark запросом, чтобы было видно, как техника движется по маршрутам.
-
-## Benchmark reports
-После каждого benchmark запуска отчет сохраняется в persistent store.
-
-Доступно:
-- `GET /api/benchmark/reports`
-- `GET /api/benchmark/reports/latest`
-- `GET /api/benchmark/reports/latest.csv`
-
-## Weight tuning
-`/api/tuning/run` подбирает более удачные scoring weights для `priority_greedy` стратегии и сохраняет tuning report.
-
-## Auth и logging
-Опционально можно включить API key auth:
-
-```bash
-export UTO_API_KEY=supersecret
-```
-
-Тогда для `API` запросов нужно передавать:
-- `X-API-Key: supersecret`
-или
-- `Authorization: Bearer supersecret`
-
-Structured logging настраивается через:
-
-```bash
-export UTO_LOG_FORMAT=json
-export UTO_LOG_LEVEL=INFO
-```
-
-## Реальные данные
-По умолчанию сервис запускается на встроенном sample dataset.
-
-Также в репозитории уже лежит готовый file-based dataset:
-
-```bash
+```text
 sample_dataset_csv/
 ```
 
-Чтобы запустить сервис именно на `CSV`-файлах, а не на in-memory sample mode:
+Если хотите запустить платформу именно на файловом наборе:
 
 ```bash
-export UTO_DATA_DIR=/absolute/path/to/uto-routing-platform/sample_dataset_csv
-PYTHONPATH=. python3 -m uvicorn uto_routing.main:app --reload
+export UTO_DATA_SOURCE=directory
+export UTO_DATA_DIR=/absolute/path/to/sample_dataset_csv
 ```
 
-В Docker этот режим уже включен по умолчанию через:
-
-```bash
-UTO_DATA_DIR=/app/sample_dataset_csv
-```
-
-Для подключения собственного набора данных задайте:
-
-```bash
-export UTO_DATA_DIR=/absolute/path/to/dataset
-```
-
-Для прямого PostgreSQL режима:
+### PostgreSQL режим
 
 ```bash
 export UTO_DATA_SOURCE=postgres
@@ -299,136 +474,114 @@ export UTO_PG_TABLE_TASKS=tasks
 export UTO_PG_TABLE_COMPATIBILITY=compatibility
 ```
 
-Для persistent app storage без Postgres можно задать:
+## Reviewer auth
+
+Платформа поддерживает reviewer-login внутри приложения.
+
+Для включения:
 
 ```bash
-export UTO_APP_DB_PATH=.data/uto_app.db
+export UTO_AUTH_MODE=reviewer
+export UTO_REVIEWER_USERNAME=reviewer
+export UTO_REVIEWER_PASSWORD=strong-password
+export UTO_SESSION_SECRET=very-secret-value
+export UTO_FORCE_SECURE_COOKIES=true
 ```
 
-Для отдельной app database:
+После этого:
+- UI требует вход через `/login`
+- защищаются `API`
+- защищается `WebSocket`
+- после логина используется cookie-сессия
+
+## Realtime и WebSocket
+Платформа использует `WebSocket` для:
+- live-state обновлений
+- audit trail обновлений
+- потока replay-кадров
+
+Если realtime-канал не поднимется:
+- интерфейс автоматически переключится на polling
+
+Дополнительно можно задать отдельный токен realtime-канала:
 
 ```bash
-export UTO_APP_DATABASE_URL=postgresql://user:password@host:5432/app_db
+export UTO_WEBSOCKET_TOKEN=some-token
 ```
 
-В папке должны лежать файлы:
-- `road_nodes.csv` или `road_nodes.json`
-- `road_edges.csv` или `road_edges.json`
-- `wells.csv` или `wells.json`
-- `vehicles.csv` или `vehicles.json`
-- `tasks.csv` или `tasks.json`
-- `compatibility.csv` или `compatibility.json`
+## Основные API endpoints
 
-Минимальные поля:
+### Пользовательские
+- `POST /auth/login`
+- `POST /auth/logout`
+- `GET /auth/me`
 
-### `road_nodes`
-- `node_id`
-- `lon`
-- `lat`
+### UI / состояние
+- `GET /`
+- `GET /login`
+- `GET /app-config`
+- `GET /api/catalog`
+- `GET /api/live-state`
+- `GET /api/audit/trail`
 
-### `road_edges`
-- `source`
-- `target`
-- `weight` или `weight_m`
+### Алгоритмы
+- `POST /api/recommendations`
+- `POST /api/route`
+- `POST /api/multitask`
+- `POST /api/plan`
+- `POST /api/benchmark/run`
+- `POST /api/replay/run`
+- `POST /api/tuning/run`
 
-### `wells`
-- `uwi`
-- `longitude`/`latitude` или `lon`/`lat`
-- опционально `nearest_node_id`
+### Отчеты
+- `GET /api/benchmark/reports`
+- `GET /api/benchmark/reports/latest`
+- `GET /api/benchmark/reports/latest.csv`
 
-### `vehicles`
-- `vehicle_id`
-- `name`
-- `vehicle_type`
-- `current_node`
-- `lon`
-- `lat`
-- `available_at` в ISO формате
-- `avg_speed_kmph`
-- опционально `skills` как `task_a|task_b|task_c`
-
-### `tasks`
-- `task_id`
-- `priority`
-- `planned_start` в ISO формате
-- `start_day` в ISO формате для корректной интерпретации смены, особенно `night`
-- `planned_duration_hours`
-- `destination_uwi`
-- `task_type`
-- `shift`
-
-### `compatibility`
-- `task_type`
-- `vehicle_type`
-
-## Docker-файлы
-- `Dockerfile` - production-like image with bundled app code
-- `docker-compose.yml` - one-command reviewer startup with `postgres + app`
-- `.dockerignore` - excludes local caches, tests, and virtualenv artifacts from build context
-- `db/init/` - postgres schema + seed scripts
-- `.github/workflows/ci.yml` - tests + docker build in CI
+### Служебные
+- `GET /health`
+- `GET /api/dataset/summary`
+- `POST /api/dataset/reload`
 
 ## Структура проекта
+
 ```text
-sample_dataset_csv/     # generated CSV dataset for tests and demos
-db/init/                # Postgres schema and seed scripts
+sample_dataset_csv/     # готовый CSV demo dataset
+db/init/                # схема и seed для Postgres
 scripts/
-  export_sample_csv.py  # regenerate sample CSV exports
+  export_sample_csv.py
+  print_share_url.py
 uto_routing/
-  config.py         # runtime settings and env parsing
-  audit.py          # dispatcher audit trail store
-  storage.py        # persistent audit/report storage + migrations
-  api.py            # FastAPI endpoints
-  service.py        # orchestration layer
-  graph.py          # graph index, shortest path, map-matching
-  planners.py       # recommenders and batch planners
-  ortools_solver.py # stronger OR-Tools batch optimizer
-  scoring.py        # explainable scoring
-  benchmark.py      # synthetic scenarios and benchmark runner
-  replay.py         # historical replay and playback timeline generation
-  tuning.py         # scoring weight search
-  logging_utils.py  # structured logging setup
-  data_loading.py   # sample/file-based dataset loading
-  sample_data.py    # built-in demo dataset
-  models.py         # domain models
-  static/           # built-in browser UI
+  api.py
+  service.py
+  graph.py
+  planners.py
+  ortools_solver.py
+  scoring.py
+  benchmark.py
+  replay.py
+  tuning.py
+  reviewer_auth.py
+  realtime.py
+  audit.py
+  storage.py
+  config.py
+  data_loading.py
+  sample_data.py
+  models.py
+  static/
 tests/
-  test_graph.py
-  test_service.py
-  test_api.py
-  test_benchmark.py
 ```
 
-## Тесты
-```bash
-python3 -m pip install -r requirements-dev.txt
-PYTHONPATH=. pytest
-```
+## Коротко: что показывать ревьюверу
+Если нужен ультра-короткий маршрут показа:
 
-## Полезные команды
-```bash
-make run
-make test
-make export-csv
-make docker-up
-make docker-share
-make docker-down
-make docker-reset
-```
+1. Войти через `/login`
+2. Показать карту
+3. Подобрать технику под одну заявку
+4. Построить маршрут
+5. Построить общий план
+6. Запустить бенчмарк с анимацией
+7. Показать журнал решений
 
-## Что уже готово
-- Полностью рабочий backend
-- Встроенный demo dataset
-- Generated `CSV` dataset for tests and demos
-- Dockerfile + docker compose for reviewer startup
-- PostgreSQL direct data source mode
-- End-to-end API
-- Browser UI on `/` with Leaflet map and audit trail
-- Benchmark framework для сравнения подходов
-- Расширенный regression test suite
-
-## Дальнейшее развитие
-- подключение к PostgreSQL напрямую вместо file export
-- более сильный batch solver (`OR-Tools`)
-- richer объяснения и audit trail для диспетчера
-- полноценная карта с leaflet/mapbox и live vehicle state
+Этого достаточно, чтобы понять идею всей платформы без чтения кода и `API`.

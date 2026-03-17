@@ -13,13 +13,14 @@ from uuid import uuid4
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, PlainTextResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, model_validator
 
 from uto_routing.config import get_settings
 from uto_routing.logging_utils import configure_logging
 from uto_routing.realtime import PlaybackStreamConfig, RealtimeHub
+from uto_routing.reviewer_auth import ReviewerAuthManager
 from uto_routing.service import RoutingPlatform
 
 settings = get_settings()
@@ -29,6 +30,8 @@ request_id_context: ContextVar[str | None] = ContextVar("request_id", default=No
 realtime_hub = RealtimeHub(
     playback_config=PlaybackStreamConfig(frame_delay_ms=settings.replay_stream_frame_delay_ms)
 )
+auth_manager = ReviewerAuthManager(settings)
+auth_manager.validate_configuration()
 
 @lru_cache(maxsize=1)
 def get_platform() -> RoutingPlatform:
@@ -142,6 +145,11 @@ class TuningRequest(BaseModel):
     candidate_limit: int = Field(default=12, ge=1, le=100)
 
 
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     realtime_hub.bind_loop(asyncio.get_running_loop())
@@ -157,6 +165,15 @@ app = FastAPI(
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
+OPEN_PATH_PREFIXES = ("/static",)
+OPEN_PATHS = {
+    "/health",
+    "/app-config",
+    "/login",
+    "/auth/login",
+    "/favicon.ico",
+}
+
 
 @app.middleware("http")
 async def request_middleware(request: Request, call_next):
@@ -164,13 +181,25 @@ async def request_middleware(request: Request, call_next):
     request_id_context.set(request_id)
     started = time.perf_counter()
 
-    if settings.api_key and request.url.path.startswith("/api/"):
+    identity = auth_manager.resolve_identity(request)
+    request.state.reviewer = identity
+
+    if auth_manager.enabled and not _is_open_path(request.url.path):
+        if identity is None:
+            if request.url.path.startswith("/api/") or request.url.path.startswith("/auth/"):
+                return JSONResponse({"detail": "Authentication required."}, status_code=401)
+            next_param = request.url.path
+            if request.url.query:
+                next_param = f"{next_param}?{request.url.query}"
+            return RedirectResponse(url=f"/login?next={next_param}", status_code=303)
+
+    if settings.api_key and request.url.path.startswith("/api/") and identity is None:
         provided_key = request.headers.get("x-api-key")
         authorization = request.headers.get("authorization", "")
         if not provided_key and authorization.lower().startswith("bearer "):
             provided_key = authorization.split(" ", 1)[1]
         if provided_key != settings.api_key:
-            raise HTTPException(status_code=401, detail="Invalid or missing API key.")
+            return JSONResponse({"detail": "Invalid or missing API key."}, status_code=401)
 
     response = await call_next(request)
     response.headers["x-request-id"] = request_id
@@ -193,10 +222,24 @@ def dashboard() -> FileResponse:
     return FileResponse(STATIC_DIR / "index.html")
 
 
+@app.get("/login")
+def login_page() -> FileResponse:
+    return FileResponse(STATIC_DIR / "login.html")
+
+
 @app.websocket("/ws/live")
 async def live_socket(websocket: WebSocket) -> None:
     api_key = websocket.query_params.get("api_key")
-    if settings.api_key and api_key != settings.api_key:
+    if auth_manager.enabled:
+        identity = auth_manager.resolve_identity_from_token(websocket.cookies.get(auth_manager.cookie_name))
+        if identity is None:
+            await websocket.close(code=4401)
+            return
+
+    if not auth_manager.enabled and settings.websocket_token and api_key != settings.websocket_token:
+        await websocket.close(code=4401)
+        return
+    if not auth_manager.enabled and not settings.websocket_token and settings.api_key and api_key != settings.api_key:
         await websocket.close(code=4401)
         return
 
@@ -242,15 +285,54 @@ def healthcheck() -> dict[str, str]:
 
 
 @app.get("/app-config")
-def app_config() -> dict[str, Any]:
+def app_config(request: Request) -> dict[str, Any]:
+    identity = getattr(request.state, "reviewer", None)
     return {
-        "auth_enabled": bool(settings.api_key),
+        "auth_enabled": auth_manager.enabled,
+        "auth_mode": settings.auth_mode,
+        "reviewer": identity.to_dict() if identity is not None else None,
+        "websocket_token": settings.websocket_token if not auth_manager.enabled else None,
         "map_defaults": {
             "lat": settings.map_default_lat,
             "lon": settings.map_default_lon,
             "zoom": settings.map_default_zoom,
         },
     }
+
+
+@app.get("/auth/me")
+def auth_me(request: Request) -> dict[str, Any]:
+    identity = getattr(request.state, "reviewer", None)
+    if auth_manager.enabled and identity is None:
+        raise HTTPException(status_code=401, detail="Authentication required.")
+    return {
+        "authenticated": identity is not None,
+        "reviewer": identity.to_dict() if identity is not None else None,
+    }
+
+
+@app.post("/auth/login")
+def auth_login(request: Request, payload: LoginRequest) -> JSONResponse:
+    if not auth_manager.enabled:
+        raise HTTPException(status_code=400, detail="Reviewer auth is disabled.")
+    if not auth_manager.authenticate_credentials(payload.username, payload.password):
+        raise HTTPException(status_code=401, detail="Неверный логин или пароль.")
+    identity = auth_manager.issue_session(payload.username)
+    response = JSONResponse(
+        {
+            "status": "ok",
+            "reviewer": identity.to_dict(),
+        }
+    )
+    auth_manager.set_session_cookie(response, identity, request)
+    return response
+
+
+@app.post("/auth/logout")
+def auth_logout() -> JSONResponse:
+    response = JSONResponse({"status": "ok"})
+    auth_manager.clear_session_cookie(response)
+    return response
 
 
 @app.get("/api/catalog")
@@ -433,4 +515,10 @@ def _schedule_realtime_snapshot(platform: RoutingPlatform) -> None:
 
 def _schedule_realtime_audit(platform: RoutingPlatform, *, limit: int = 20) -> None:
     realtime_hub.schedule_audit(platform.audit_events(limit=limit))
+
+
+def _is_open_path(path: str) -> bool:
+    if path in OPEN_PATHS:
+        return True
+    return any(path.startswith(prefix) for prefix in OPEN_PATH_PREFIXES)
 
