@@ -2,6 +2,7 @@ const state = {
   summary: null,
   catalog: null,
   appConfig: null,
+  reviewer: null,
   lastRecommendationDestination: null,
   liveState: null,
   operationsMap: null,
@@ -59,10 +60,6 @@ document.addEventListener("DOMContentLoaded", () => {
 });
 
 async function bootstrap() {
-  const savedApiKey = window.localStorage.getItem("uto_api_key");
-  if (savedApiKey) {
-    document.getElementById("api-key-input").value = savedApiKey;
-  }
   await refreshAll();
   initRealtimeSocket();
 }
@@ -72,7 +69,7 @@ function bindEvents() {
     await requestJson("/api/dataset/reload", { method: "POST" });
     await refreshAll();
   });
-  document.getElementById("save-api-key-btn").addEventListener("click", saveApiKey);
+  document.getElementById("logout-btn").addEventListener("click", logoutReviewer);
 
   document.querySelectorAll('input[name="recommendation-mode"]').forEach((input) => {
     input.addEventListener("change", updateRecommendationMode);
@@ -108,15 +105,18 @@ async function refreshAll() {
   setStatus("benchmark-status", "", "");
   setStatus("tuning-status", "", "");
 
-  const [appConfig, summary, catalog] = await Promise.all([
+  const [appConfig, summary, catalog, authMe] = await Promise.all([
     requestJson("/app-config"),
     requestJson("/api/dataset/summary"),
     requestJson("/api/catalog"),
+    requestJson("/auth/me"),
   ]);
 
   state.appConfig = appConfig;
   state.summary = summary;
   state.catalog = catalog;
+  state.reviewer = authMe.reviewer;
+  renderReviewerHeader(authMe.reviewer);
   renderSummary(summary);
   hydrateFormOptions(catalog);
   updateRecommendationMode();
@@ -132,9 +132,9 @@ function initRealtimeSocket() {
 
   const protocol = window.location.protocol === "https:" ? "wss" : "ws";
   const url = new URL(`${protocol}://${window.location.host}/ws/live`);
-  const apiKey = window.localStorage.getItem("uto_api_key");
-  if (apiKey) {
-    url.searchParams.set("api_key", apiKey);
+  const socketToken = state.appConfig?.websocket_token;
+  if (socketToken) {
+    url.searchParams.set("api_key", socketToken);
   }
 
   setRealtimeConnectionBadge("подключение...", "offline");
@@ -389,14 +389,20 @@ function fillSelect(select, options) {
   }
 }
 
-function saveApiKey() {
-  const value = document.getElementById("api-key-input").value.trim();
-  if (value) {
-    window.localStorage.setItem("uto_api_key", value);
-    setStatus("recommendations-status", "API-ключ сохранен локально в браузере.", "success");
-  } else {
-    window.localStorage.removeItem("uto_api_key");
-    setStatus("recommendations-status", "API-ключ удален.", "success");
+function renderReviewerHeader(reviewer) {
+  const nameNode = document.getElementById("reviewer-name");
+  if (!reviewer) {
+    nameNode.textContent = "Гость";
+    return;
+  }
+  nameNode.textContent = `Вошел: ${reviewer.display_name || reviewer.username}`;
+}
+
+async function logoutReviewer() {
+  try {
+    await fetch("/auth/logout", { method: "POST" });
+  } finally {
+    window.location.href = "/login";
   }
 }
 
@@ -1381,17 +1387,19 @@ function setStatus(elementId, message, tone) {
 }
 
 async function requestJson(url, options = {}) {
-  const apiKey = window.localStorage.getItem("uto_api_key");
   const response = await fetch(url, {
     headers: {
       "Content-Type": "application/json",
-      ...(apiKey ? { "x-api-key": apiKey } : {}),
       ...(options.headers || {}),
     },
     ...options,
   });
 
   if (!response.ok) {
+    if (response.status === 401) {
+      window.location.href = `/login?next=${encodeURIComponent(window.location.pathname + window.location.search)}`;
+      throw new Error("Требуется вход.");
+    }
     let message = `Request failed with status ${response.status}`;
     try {
       const error = await response.json();

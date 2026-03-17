@@ -1,6 +1,7 @@
 from fastapi.testclient import TestClient
 
 from uto_routing.api import app, get_platform
+from uto_routing.config import get_settings
 
 
 def test_api_endpoints_smoke() -> None:
@@ -109,4 +110,64 @@ def test_api_endpoints_smoke() -> None:
         },
     )
     assert invalid_custom_request.status_code == 400
+
+
+def test_reviewer_auth_flow() -> None:
+    import os
+
+    os.environ["UTO_AUTH_MODE"] = "reviewer"
+    os.environ["UTO_REVIEWER_USERNAME"] = "reviewer"
+    os.environ["UTO_REVIEWER_PASSWORD"] = "secret123"
+    os.environ["UTO_SESSION_SECRET"] = "super-secret-session-key"
+
+    get_platform.cache_clear()
+    get_settings.cache_clear()
+    from uto_routing import api as api_module
+
+    api_module.settings = get_settings()
+    api_module.auth_manager = api_module.ReviewerAuthManager(api_module.settings)
+    api_module.auth_manager.validate_configuration()
+    api_module.get_platform.cache_clear()
+
+    client = TestClient(api_module.app)
+
+    login_page = client.get("/login")
+    assert login_page.status_code == 200
+    assert "Вход в панель диспетчера" in login_page.text
+
+    protected = client.get("/", follow_redirects=False)
+    assert protected.status_code == 303
+    assert protected.headers["location"].startswith("/login")
+
+    failed_login = client.post("/auth/login", json={"username": "reviewer", "password": "wrong"})
+    assert failed_login.status_code == 401
+
+    login = client.post("/auth/login", json={"username": "reviewer", "password": "secret123"})
+    assert login.status_code == 200
+
+    me = client.get("/auth/me")
+    assert me.status_code == 200
+    assert me.json()["reviewer"]["username"] == "reviewer"
+
+    page = client.get("/")
+    assert page.status_code == 200
+
+    with client.websocket_connect("/ws/live") as websocket:
+        connected = websocket.receive_json()
+        assert connected["type"] == "connection"
+
+    client.post("/auth/logout")
+    unauth_me = client.get("/auth/me")
+    assert unauth_me.status_code == 401
+
+    for key in [
+        "UTO_AUTH_MODE",
+        "UTO_REVIEWER_USERNAME",
+        "UTO_REVIEWER_PASSWORD",
+        "UTO_SESSION_SECRET",
+    ]:
+        os.environ.pop(key, None)
+
+    api_module.get_platform.cache_clear()
+    get_settings.cache_clear()
 
