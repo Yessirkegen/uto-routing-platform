@@ -1,0 +1,43 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: uto-routing-postgres
+    environment:
+      POSTGRES_DB: uto_routing
+      POSTGRES_USER: uto
+      POSTGRES_PASSWORD: uto
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U uto -d uto_routing"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+      - ./sample_dataset_csv:/seed-data:ro
+    restart: unless-stopped
+
+  uto-routing-platform:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: uto-routing-platform
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PORT: "8000"
+      UTO_DATA_SOURCE: postgres
+      UTO_DATABASE_URL: postgresql://uto:uto@postgres:5432/uto_routing
+      UTO_ORTOOLS_TIME_LIMIT_SECONDS: "2"
+    restart: unless-stopped
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    profiles: ["share"]
+    depends_on:
+      uto-routing-platform:
+        condition: service_healthy
+    command: tunnel --no-autoupdate --url http://uto-routing-platform:8000
+    restart: unless-stopped
